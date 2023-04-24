@@ -1,0 +1,454 @@
+// https://github.com/douglaszuqueto/esp8266-http-request
+
+// ############# LIBRARIES ############### //
+#include <Arduino.h>
+#include <Http.h>
+#include <ArduinoJson.h>
+
+#include "DHTesp.h" // Biblioteca: DHT sensor library for ESPx
+
+#define IS_HTTPS TRUE"
+
+#define PIN_ANEMOMETRO D2
+#define PIN_DIRECAO_VENTO A0
+#define PIN_PLUVIOMETRO D9
+#define RST_PIN 8
+#define RX_PIN 10
+#define TX_PIN 9
+
+const char BEARER[] PROGMEM = "your.mobile.service.provider.apn";
+
+// ############# PROTOTYPES ############### //
+
+void initDHT();
+void httpRequest(String path);
+String processDirecaoVento(float valor);
+void setup()
+{
+  Serial.begin(9600);
+  while (!Serial)
+    ;
+  Serial.println("Starting!");
+}
+
+#define SENSOR_TEMPERATURA D5
+#define SENSOR_CHUVA D4
+
+// DHT dht(SENSOR_TEMPERATURA, DHT22);
+DHTesp dht;
+float h = 0.0;
+float t = 0.0;
+int chuva = 0;
+float valorDirecaoVento = 0.0;
+String status;
+
+String equipamento = "METEOROLOGICO_BVG_01";
+
+// int umMinuto = 60*1000;
+int umMinuto = 1000;
+
+
+// Variaveis Pluviometro:
+int valorPluviometro = 0;
+int old_val = 0;
+int PLUVI_COUNT = 0;
+
+// Variáveis Anemometro
+int valorAnemometro = 0;
+const float pi = 3.14159265;     //Número de pi
+int period = 5000;               //Tempo de medida(miliseconds)
+int delaytime = 2000;            //Invervalo entre as amostras (miliseconds)
+int radius = 147;                //Raio do anemometro(mm)
+unsigned int qtdAmostras  = 0;        //Armazena o número de amostras
+unsigned int qtdAnemometro = 0;        //Contador para o sensor
+unsigned int RPM = 0;            //Rotações por minuto
+float speedwind = 0;             //Velocidade do vento (m/s)
+float windspeed = 0;             //Velocidade do vento (km/h)
+
+StaticJsonDocument<200> jsonDoc;
+
+
+void addcount() { // Incrementa contador
+  qtdAnemometro++;
+}
+
+// ############## FUNCOES PRINCIPAIS ################# //
+
+void setup() {
+  initSerial();
+  initWiFi();
+  // initDHT();
+
+  dht.setup(SENSOR_TEMPERATURA, DHTesp::DHT22);
+}
+
+void loop() {
+  
+  HTTP http(9600, RX_PIN, TX_PIN, RST_PIN);
+
+  char response[32];
+  char body[90];
+  Result result;
+
+   result = http.connect(BEARER);
+  Serial.print(F("HTTP connect: "));
+  Serial.println(result);
+
+  sprintf(body, "{\"title\": \"%s\", \"body\": \"%s\", \"user_id\": \"%d\"}", "Arduino", "Test", 1);
+  result = http.post("https://your.api", body, response);
+  Serial.print(F("HTTP POST: "));
+  Serial.println(result);
+  if (result == SUCCESS)
+  {
+    Serial.println(response);
+    StaticJsonBuffer<64> jsonBuffer;
+    JsonObject &root = jsonBuffer.parseObject(response);
+
+    const char *id = root[F("id")];
+    Serial.print(F("ID: "));
+    Serial.println(id);
+
+    result = http.get("https://your.api", response);
+  Serial.print(F("HTTP GET: "));
+  Serial.println(result);
+  if (result == SUCCESS)
+  {
+    Serial.println(response);
+    StaticJsonBuffer<64> jsonBuffer;
+    JsonObject &root = jsonBuffer.parseObject(response);
+
+    const char *id = root[F("id")];
+    Serial.print(F("ID: "));
+    Serial.println(id);
+  }
+
+  if(digitalRead(SENSOR_CHUVA) == LOW){
+    chuva = 1;
+  } else {
+    chuva = 0;
+  }
+  
+  h = dht.getHumidity();
+  t = dht.getTemperature();
+  // h = dht.readHumidity();
+  // t = dht.readTemperature();
+  Serial.print("temperatura: ");
+  Serial.println(t);
+  Serial.print("umidade: ");
+  Serial.println(h);
+
+  valorDirecaoVento = analogRead(PIN_DIRECAO_VENTO) * (5.0 / 1023.0); // Calcula a tensao
+  // Serial.print("direcao do vento: ");
+  // Serial.println(valorDirecaoVento);
+  String bodyDirecaoVento = processDirecaoVento(valorDirecaoVento);
+  // Serial.println(bodyDirecaoVento);
+
+  valorPluviometro = digitalRead(PIN_PLUVIOMETRO);
+  // Serial.print("pluviometro: ");
+  // Serial.println(valorPluviometro);
+  String bodyPluviometro = processPluviometro(valorPluviometro);
+  // Serial.println(bodyPluviometro);
+
+  valorAnemometro = analogRead(PIN_ANEMOMETRO) * (5.0 / 1023.0); // Calcula a tensao  
+  String bodyAnemometro = processAnemometro(valorAnemometro);
+  // Serial.print("anemometro: ");
+  // Serial.println(bodyAnemometro);
+
+  status = "error";
+
+  if ( isnan(t) || isnan(h) ) {
+    Serial.println("Erro ao ler os dados do DHT!");
+    h = 0;
+    t = 0;
+    // return;
+  } else {
+    status = "ok";
+    // Serial.print(dht.getStatusString());
+    Serial.print("| Temperatura: ");
+    Serial.print(t, 1);
+    Serial.print(" | Umidade: ");
+    Serial.print(h, 1);
+  }
+  
+  Serial.print(" | Chuva: ");
+  Serial.println(chuva, 1);
+
+  String body = "equipamento="+equipamento+"&temperatura="+t+"&umidade="+h+"&chuva="+chuva+"&status="+status;
+  body += "&" + bodyDirecaoVento;
+  body += "&" + bodyPluviometro;
+  body += "&" + bodyAnemometro;
+  Serial.println("body: " + body);
+
+  // String token = makePostRequestLogin();
+  // Serial.println(token);
+  String token = "";
+    // httpRequest(BASE_URL, "GET", body, "");
+  httpRequest(BASE_URL, "POST", body, token);
+
+  Serial.println("");
+  delay(1000);
+}
+
+// ############## FUNCOES AUXILIARES ################# //
+
+void httpRequest(String path, String type, String body, String token) {
+  Serial.println("["+type+"] - sending request...");
+  Serial.println("");
+
+  String payload;
+
+  if(type.equals("POST")) {
+    payload = makePostRequest(path, body, token);
+  } else {
+    payload = makeGetRequest(path, body, token);
+  }
+
+  if (!payload) {
+    return;
+  }
+
+  Serial.println("##[RESULT]## ==> " + payload);
+}
+
+String makeGetRequest(String path, String body, String token) {
+  String url_full = path + body;
+  Serial.println(url_full);
+
+  client.setInsecure();
+  client.connect(path, 443);
+  http.begin(client, url_full);
+
+  if(token != "") {
+    http.addHeader("authorization", "Bearer " + token);
+  }
+
+  int httpCode = http.GET();
+
+  // Serial.println("-> httpCode: " + httpCode);
+
+  if (httpCode < 0) {
+    Serial.println("request error - " + httpCode);
+    return "";
+  }
+
+  if (httpCode != HTTP_CODE_OK) {
+    return "";
+  }
+
+  String response =  http.getString();
+  http.end();
+
+  // Serial.println("-> response: " + response);
+
+  return response;
+}
+
+// String body = "id=7890&name=NTC&type=temperature&value=10";
+String makePostRequest(String path, String body, String token) {
+  Serial.println("body2: " + body);
+  
+  client.setInsecure();
+  client.connect(path, 443);
+  http.begin(client, path);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  if(token != "") {
+    http.addHeader("authorization", "Bearer " + token);
+  }
+
+  int httpCode = http.POST(body);
+
+  if (httpCode < 0) {
+    Serial.println("request error - " + httpCode);
+    return "";
+  }
+
+  if (httpCode != HTTP_CODE_OK) {
+    return "";
+  }
+
+  String response =  http.getString();
+  http.end();
+
+  return response;
+}
+
+String makePostRequestLogin() {  
+  String path = "https://plataformacidts.com/cidts_ws/usuarios/login";
+  
+  String usuario = "cidts_semb";
+  String senha = "cidts_semb_123";
+  String body = "login="+usuario+"&senha="+senha;
+
+  client.setInsecure();
+  client.connect(path, 443);
+  http.begin(client, path);
+  http.addHeader("Content-Type", "multipart/form-data");
+  
+  int httpCode = http.POST(body);
+
+  if (httpCode < 0) {
+    Serial.println("request error - " + httpCode);
+    return "";
+  }
+
+  if (httpCode != HTTP_CODE_OK) {
+    return "";
+  }
+
+  String response =  http.getString();
+  http.end();
+
+  DeserializationError error = deserializeJson(jsonDoc, response);
+
+  if (error) {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+    return "";
+  }    
+  const char* token = jsonDoc["token"];
+
+  return String(token);
+}
+
+// ############## FUNCOES INIT ################# //
+
+void initSerial() {
+  Serial.begin(115200);
+}
+
+void initWiFi() {
+  delay(10);
+  Serial.println("Conectando-se em: " + String(SSID));
+
+  WiFi.begin(SSID, PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(100);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("Conectado na Rede " + String(SSID) + " | IP => ");
+  Serial.println(WiFi.localIP());
+}
+
+void initDHTP(){
+  // dht.setup(16, DHTesp::DHT22);
+}
+
+void initWeather() {
+  // Direcao do Vento
+  // analogReference(DEFAULT);
+
+  // Anemometro
+  pinMode(PIN_ANEMOMETRO, INPUT);
+  digitalWrite(PIN_ANEMOMETRO, HIGH);
+
+  // Pluviometro
+  pinMode(PIN_PLUVIOMETRO, INPUT_PULLUP);
+}
+
+String processDirecaoVento(float valor) {
+  int winddir = 0;
+  String winddesc = "";
+  
+  if (valor <= 2.90) { // Indica a posição norte
+    winddir = 0;
+    winddesc = "Norte";
+  } else if (valor <= 3.05) { // Indica a posição noroeste
+    winddir = 315;
+    winddesc = "Noroeste";
+  } else if (valor <= 3.25) { // Indica a posição oeste
+    winddir = 270;
+    winddesc = "Oeste";
+  } else if (valor <= 3.45) { // Indica a posição sudoeste
+    winddir = 225;
+    winddesc = "Sudoeste";
+  } else if (valor <= 3.75) { // Indica a posição sul
+    winddir = 180;
+    winddesc = "Sul";
+  } else if (valor <= 4.00) { // Indica a posição sudeste
+    winddir = 135;
+    winddesc = "Sudeste";
+  } else if (valor <= 4.25) { // Indica a posição leste
+    winddir = 90;
+    winddesc = "Leste";
+  } else if (valor <= 4.65) { // Indica a posição nordeste
+    winddir = 45;
+    winddesc = "Nordeste";
+  } else { // Caso nenhum valor seja compatível, imprime FAIL
+    winddir = 000;
+    winddesc = "FAIL";
+  }
+ 
+  Serial.println("Angulo: " + String(winddir) + " Graus ["+ winddesc + "]");
+
+  return "winddir="+String(winddir)+"&winddesc="+winddesc;
+}
+
+String processPluviometro(int val) {
+  if ((val == LOW) && (old_val == HIGH)) {   // Verefica se o Status mudou
+    delay(10);                   // Atraso colocado para lidar com qualquer "salto" no switch.
+    PLUVI_COUNT = PLUVI_COUNT + 1;   // Adiciona 1 à cntagem de pulsos
+    old_val = val;              //Iguala o valor antigo com o atual
+  
+    float pl_qtd = PLUVI_COUNT; // numero de pulsos
+    float pl_mm = PLUVI_COUNT * 0.25; // valor em milimetros
+
+    return "pl_qtd="+String(pl_qtd)+"&pl_mm="+String(pl_mm);
+
+  } else {
+    old_val = val;              //If the status hasn't changed then do nothing
+  }
+
+  return "pl_qtd="+String(0)+"&pl_mm="+String(0);
+}
+
+String processAnemometro(int valor) {
+  qtdAmostras++;
+  Serial.print(qtdAmostras);
+  Serial.print(": Inicia Leitura ANEMOMETRO...");
+  // windvelocity();
+  Serial.println("   Finalizado.");
+  // Serial.print("Contador: ");
+  // Serial.print(qtdAnemometro);
+  
+  // RPMcalc();
+
+  // WindSpeed(); // //print m/s
+  // Serial.print(windspeed);
+  // Serial.print(" [m/s] ");
+
+  // SpeedWind(); // //print km/h
+  
+  // delay(delaytime);
+
+  speedwind = 0.926*valor;
+  speedwind = (int)(speedwind*3.6);
+
+  return "speedwind="+String(speedwind) + "&rpm="+String(RPM);
+}
+
+// ############## FUNCOES AUXILIARES - ANEMOMETRO ################# //
+
+void windvelocity() { // medir velocidade do vento
+  speedwind = 0;
+  windspeed = 0;
+
+  qtdAnemometro = 0;
+  attachInterrupt(PIN_ANEMOMETRO, addcount, RISING);
+  unsigned long millis();
+  long startTime = millis();
+  while (millis() < startTime + period) {}
+}
+
+void RPMcalc() { // calcular o RPM
+  RPM = ((qtdAnemometro) * 60) / (period / 1000); // Calculate revolutions per minute (RPM)
+}
+
+void WindSpeed() { // Velocidade do vento em m/s
+  windspeed = ((4 * pi * radius * RPM) / 60) / 1000;
+} 
+
+void SpeedWind() { // //Velocidade do vento em km/h
+  speedwind = (((4 * pi * radius * RPM) / 60) / 1000) * 3.6;
+} 
